@@ -576,7 +576,7 @@ def remove_subcategories_duplicated(dict_array_subcategories):
 def get_data_from_category_as_headers_and_column_data(db, cat_id):
     cursor = db.connection.cursor()
     headers=show_columns_category(db,cat_id)
-    cursor.execute("SELECT cont_id FROM cat_cont WHERE cat_id=%s",cat_id)
+    cursor.execute("SELECT cont_id FROM cat_cont WHERE cat_id=%s", (cat_id,))
     result = cursor.fetchall()
     rows = []
     for cont_id in result:
@@ -661,3 +661,106 @@ def get_category_name_from_id(db, cat_id):
     for row in cursor.fetchall():
         return row[0]
 
+
+
+def search_papers_id(db, paper_values, authors_value, categories_values, show_not_in_selection=False):
+    cursor = db.connection.cursor()
+
+    # Search paper ids with paper_values
+    where_clause = ""
+    values_tuple = ()
+    
+    if not show_not_in_selection:
+        where_clause = "NOT code_name='not-in-selection' AND "
+
+    for value in paper_values:
+        where_clause += f"{value['id_name']} LIKE %s AND "
+        values_tuple += (f"%{value['value']}%",)
+
+    print("where clause: "+ where_clause)
+    print("values-tuple: " + str(values_tuple))
+
+    where_clause = where_clause[:-5]
+    cursor.execute("SELECT DISTINCT id FROM papers.paper WHERE " + where_clause, values_tuple)
+    paper_conditions_id_list = [row[0] for row in cursor.fetchall()]
+    paper_conditions_id_set = set(paper_conditions_id_list)
+
+    # Search for all the papers with all authors in authors_value
+    authors_list = set(authors_value.split(','))
+
+    id_dict_by_author = {}
+    for author in authors_list:
+        cursor.execute('''SELECT DISTINCT paper_id FROM papers.paper_has_authors
+                          WHERE author_id IN (SELECT id FROM papers.author WHERE name LIKE %s)''', ["%" + author + "%"])
+        id_list_by_author = [row[0] for row in cursor.fetchall()]
+        id_dict_by_author[author] = set(id_list_by_author)
+
+    # Search for all the paper that meet the 'category' specifications
+    paper_id_sets_by_category_list = []
+
+    for category in categories_values:
+        cat_id = category['cat_id']
+        cat_table_name = "papers.paper_has_cont"
+        category_where_clause = ""
+        category_values_tuple = ()
+
+        for element in category['values']:
+            if not element['is_subcat']:
+                category_where_clause += f"{element['id_name']} LIKE %s AND "
+                category_values_tuple += (f"%{element['value']}%",)
+
+        category_where_clause = category_where_clause[:-5]
+        full_query = f"SELECT DISTINCT paper_id FROM {cat_table_name} WHERE cat_id = {cat_id} AND " + category_where_clause
+        print(category_values_tuple)
+        print("Full Query:", full_query)
+        cursor.execute(f"SELECT DISTINCT paper_id FROM {cat_table_name} WHERE cat_id = {cat_id}")
+
+        category_id_by_column_conditions_list = [row[0] for row in cursor.fetchall()]
+        category_id_by_column_conditions_set = set(category_id_by_column_conditions_list)
+
+        for element in category['values']:
+            if element['is_subcat']:
+                subcat_id = element['subcat_id']
+                subcat_name = "papers.cat_cont"  # Adjust this based on your actual subcategory table
+                interaction = element['rel_with_cat']
+                cat_interact_subcat_table_name = "papers.int_cat"  # Adjust this based on your actual linking table
+                cursor.execute(f'''SELECT DISTINCT paper_id FROM {cat_interact_subcat_table_name}
+                                   WHERE cat_id = %s AND int_id = %s AND name LIKE %s''',
+                               (cat_id, subcat_id, "%" + element['name_value'] + "%"))
+
+                category_id_list_by_this_subcategory_conditions = [row[0] for row in cursor.fetchall()]
+                category_id_set = set(category_id_list_by_this_subcategory_conditions)
+                category_id_by_column_conditions_set.intersection_update(category_id_set)
+
+        paper_id_sets_by_category_list.append(category_id_by_column_conditions_set)
+
+    # Return the intersection of all the paper_id sets and set lists previously created
+    for cat_set in paper_id_sets_by_category_list:
+        paper_conditions_id_set.intersection_update(cat_set)
+
+    for author in authors_list:
+        paper_conditions_id_set.intersection_update(id_dict_by_author[author])
+
+    str_in = "(" + ",".join(map(str, paper_conditions_id_set)) + ")"
+
+    if len(str_in) > 2:
+        print(f"SELECT id FROM papers.paper WHERE id IN {str_in} ORDER BY year")
+        cursor.execute(f"SELECT id FROM papers.paper WHERE id IN {str_in} ORDER BY year")
+        result_id_list = [row[0] for row in cursor.fetchall()]
+        return result_id_list
+    else:
+        return list(paper_conditions_id_set)
+
+
+def get_paper_properties_and_values_on_table_format(db, paper_id):
+    dict_array = get_paper_properties_and_values(db, paper_id)
+    dict_result = {}
+    for dictionary in dict_array:
+        if dictionary['type'] == 'category':
+            str_value = ""
+            for value in dictionary['value']:
+                str_value = str_value + str(value) +";"
+            dict_result[dictionary['name']] = str_value
+        else:
+            dict_result[dictionary['name']] = dictionary['value']
+    return dict_result
